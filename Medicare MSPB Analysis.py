@@ -28,209 +28,284 @@ Results: See PDF output.
 # Import relevant packages needed for data exploration and analysis
 import numpy as np
 import matplotlib.colors as mcolors
-import geopandas as gpd #pip install geopandas
+import geopandas as gpd
 from shapely.geometry import Polygon
 import os
+import logging
 from fpdf import FPDF
 import time
 import pandas as pd
 import matplotlib.pyplot as plt
-import dataframe_image as dfi #pip install dataframe_image
+import dataframe_image as dfi
+
+# -------------------------------------------------------
+# LOGGING SETUP
+# Logs are saved to the working directory alongside outputs.
+# Each run appends to the same log file so you retain a
+# full history of runs, warnings, and data quality flags.
+# -------------------------------------------------------
+#Set up the log path
+log_path = "/Users/emilyquick-cole/Documents/Python/medicare_analysis/medicare_analyzer.log"
 
 
-''' Initial Data Cleaning '''
-# Set working directory, change this to match relevant path
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(log_path),  # writes to log file
+        logging.StreamHandler()         # also prints to console
+    ]
+)
+
+logger = logging.getLogger(__name__)
+logger.info('=' * 60)
+logger.info('Medicare MSPB Analyzer — Run started')
+logger.info('=' * 60)
+
+
+# -------------------------------------------------------
+# SETUP
+# -------------------------------------------------------
 new_directory_path = "/Users/emilyquick-cole/Documents/Python/medicare_analysis"
 os.chdir(new_directory_path)
+logger.info(f'Working directory set to: {new_directory_path}')
 
-#Load your dataset (e.g., CSV file)
+
+# -------------------------------------------------------
+# LOAD DATA
+# -------------------------------------------------------
+logger.info('--- Loading data ---')
+
+#Load the hospital data
 df = pd.read_csv('Medicare_Hospital_Spending_Per_Patient-Hospital.csv')
-
-#Save as a dataframe
+#Convert to a dataframe
 df = pd.DataFrame(df)
 
-#Count the number of rows within the dataset--this is the number of hospitals
+#Take the length of the df to get the total number of hospitals
 total_hospitals = len(df)
-print(f"There are {total_hospitals} hospitals in this dataset.")
+#Print to the log the total number of hospitals in the dataset
+logger.info(f'Data loaded successfully — {total_hospitals} hospitals in dataset')
 
-# Count the number of rows missing a Score value
-rows_with_missing_data = df['Score'].isnull().sum() #No rows are missing data; however, some rows have N/A indicated
-print(f"Number of rows with missing data: {rows_with_missing_data}")
 
-# Count rows where the Score column is indicated as "Not Available"
+# -------------------------------------------------------
+# INITIAL DATA CLEANING
+# -------------------------------------------------------
+logger.info('--- Initial data cleaning ---')
+
+#count the number of rows that are missing a Score value
+rows_with_missing_data = df['Score'].isnull().sum()
+#Print this number to the log
+logger.info(f'Rows with null Score values: {rows_with_missing_data}')
+
+#Save the number of rows where the Score value is Not Available
 na_count = (df['Score'] == 'Not Available').sum()
-print(f"{na_count} hospitals reported that scores were not available") #1,682 rows are indicated as Not Available
+#Save this number to the log
+logger.info(f'Hospitals reporting scores as "Not Available": {na_count}')
 
-#Save not available scores to a new data frame and drop them from original dataframe
+# Create a flag if the na_count is above 30%
+if na_count / total_hospitals > 0.3:
+    logger.warning(f'"Not Available" scores represent more than 30% of the dataset ({na_count}/{total_hospitals}) — review before proceeding')
+
+# Save not available rows and drop from main dataframe
 na_df = df[df['Score'] == 'Not Available']
-print('na_df score col', na_df['Score'])
-
-#Remove rows that contain a Score value of 'Not Available'
 score_df = df[df['Score'] != 'Not Available']
 
-#Check that the only values remaining can be converted to a float
-print('Unique values of score are', df['Score'].unique())
+#Print to the log the number of hospitals retained in the dataset
+logger.info(f'Hospitals with reportable scores retained: {len(score_df)}')
 
-#set Score variable to a float
+# Convert Score to float and State to string
 score_df['Score'] = score_df['Score'].astype('float64')
-
-#Set the State column to a string
 score_df['State'] = score_df['State'].astype('string')
+#Print these changes to the log
+logger.info('Score column converted to float64, State column converted to string')
 
-'''Formatting Data for Map Visual '''
-#Group hospitals by state and take their median Score and reset the index of the resulting dataframe
+
+# -------------------------------------------------------
+# MEDIAN SCORE BY STATE
+# -------------------------------------------------------
+logger.info('--- Computing median MSPB score by state ---')
+
+#Group the score_df values by State and take the median value of the Scores
 med_df = score_df.groupby(['State'])['Score'].median().reset_index()
-
-#sort the data from greatest to least
+#Sort this dataframe by Score
 med_df = med_df.sort_values(by=['Score'], ascending=False)
-print(f"The median Medicare Spending per Beneficiary Score (MSPB) by state is {med_df}.")
 
-#print the number of states with a score of 1.0, above 1.0, and below 1.0
+#identify the number of states with a median score above 1, equal to 1, and below 1
 above1 = len(med_df[med_df['Score'] > 1.0])
 at1 = len(med_df[med_df['Score'] == 1.0])
 below1 = len(med_df[med_df['Score'] < 1.0])
-print(f"{above1} states have a median score over 1.0. {at1} states have a median score of 1.0. {below1} states have a median score less than 1.0.")
+
+logger.info(f'States with median score above 1.0: {above1}')
+logger.info(f'States with median score equal to 1.0: {at1}')
+logger.info(f'States with median score below 1.0: {below1}')
+
+# Flag if any states are missing entirely
+expected_states = 51  # 50 states + DC
+if len(med_df) < expected_states:
+    logger.warning(f'Only {len(med_df)} states found in scored data — expected {expected_states}. Check for missing state records.')
 
 
-'''Map Visual: Take the median MSPB Score of all States and plot them on a map of the U.S. color coding based on score'''
-#Read in the datafile with U.S. map shape data
-gdf = gpd.read_file('/Users/emilyquick-cole/Documents/Python/medicare_analysis/cb_2018_us_state_500k')
+# -------------------------------------------------------
+# MAP VISUAL
+# -------------------------------------------------------
+logger.info('--- Generating map visual ---')
 
-#Merge the Geopandas Dataframe with MSPB data based on 'State'
-gdf = gdf.merge(med_df,left_on='STUSPS',right_on='State')
+#import the shape file
+shapefile_path = '/Users/emilyquick-cole/Documents/Python/medicare_analysis/cb_2018_us_state_500k'
+# Print to the log the file path of the shape file
+logger.info(f'Loading shapefile from: {shapefile_path}')
 
-#Check that the dataframes merged correctly
+#read the file
+gdf = gpd.read_file(shapefile_path)
+#merge the dataframes with median scores onto the gdf shape file
+gdf = gdf.merge(med_df, left_on='STUSPS', right_on='State')
+
+#Create a flag that tells how many states were mapped onto the gdf file
+logger.info(f'Shapefile merged with MSPB data — {len(gdf)} states mapped')
+
+# Check that AK and HI are present for inset maps
+for state in ['AK', 'HI']:
+    if state not in gdf['State'].values:
+        logger.warning(f'{state} not found in merged geodataframe — inset map for this state will be skipped')
+
+#Export the gdf file to an Excel file document for manual checks
 gdf.to_excel('/Users/emilyquick-cole/Documents/Python/medicare_analysis/gdf.xlsx', index=False)
 
-#We can re-project coordinates for any of the components of our map using the geopandas command .to_crs()
-gdf.to_crs({'init':'epsg:2163'})
+#Print a flag to the log indicating that we exported the GDF file
+logger.info('Merged geodataframe exported to gdf.xlsx for review')
 
-#Create new boxes to map them in underneath and to the left of the continental US.
-#Create a "copy" of gdf for re-projecting
-visframe = gdf.to_crs({'init':'epsg:2163'})
+# Reproject the gdf dataframe to a different coordinate reference system (CRS) —
+# specifically EPSG 2163, which is a U.S.-centered equal-area projection that
+# makes the map look more proportional than raw latitude/longitude.
+visframe = gdf.to_crs('epsg:2163')
 
-#Create figure and axes for with Matplotlib for main map
-fig, ax = plt.subplots(1, figsize=(18, 14))
+#Save the column name Score to a variable to reference later
+variable = 'Score'
+#Pulls the minimum and maximum Score values from the geodataframe.
+# These are used to anchor the colormap scale so the color range spans
+# the actual data range — the lowest scoring state gets the lightest color
+# and the highest gets the darkest.
+vmin, vmax = gdf.Score.min(), gdf.Score.max()
+# Sets the colormap to Yellow-Orange-Brown
+colormap = "YlOrBr"
 
-#Remove the axis box from the main map
-ax.axis('off')
+#Print the score range for the colormap to the log file
+logger.info(f'Score range for colormap: {vmin:.4f} to {vmax:.4f}')
 
-#Create map of all states except AK and HI in the main map axis
-visframe[~visframe.STUSPS.isin(['HI','AK'])].plot(color='lightblue', linewidth=0.8, ax=ax, edgecolor='0.8')
-
-#Add Alaska Axis (x, y, width, height)
-akax = fig.add_axes([0.1, 0.17, 0.17, 0.16])
-
-#Add Hawaii Axis(x, y, width, height)
-hiax = fig.add_axes([.28, 0.20, 0.1, 0.1])
-
-#We'll later map Alaska in "akax" and Hawaii in "hiax"
-
-#Apply this to the gdf to ensure all states are assigned colors by the same func
-def makeColorColumn(gdf,variable,vmin,vmax):
-    # apply a function to a column to create a new column of assigned colors & return full frame
+# Create a helper function makeColorColumn that takes our dataframe, variable, vmin and vmax
+# and creates a new column that assigns each row with a color hue
+# states with similar scores get similar colors and the full range of
+# scores maps consistently across the colormap.
+def makeColorColumn(gdf, variable, vmin, vmax):
+    #Normalizes the scale based on the vmin and vmax of Score
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+    # Create the actual color mapper by combining the normalizer with the YlOrBr colormap.
     mapper = plt.cm.ScalarMappable(norm=norm, cmap=plt.cm.YlOrBr)
+    # converts the score to an RGBA color tuple and then to a hexstring and store the value
+    # in the new column
     gdf['value_determined_color'] = gdf[variable].apply(lambda x: mcolors.to_hex(mapper.to_rgba(x)))
     return gdf
 
-#S the value column that will be visualised
-variable = 'Score'
+#Apply the function to the gdf dataframe, using the previously defined variables
+gdf = makeColorColumn(gdf, variable, vmin, vmax)
 
-#Make a column for value_determined_color in gdf
-#Set the range for the choropleth values with the upper bound the rounded up maximum value
-vmin, vmax = gdf.Score.min(), gdf.Score.max() #math.ceil(gdf.pct_food_insecure.max())
-
-#Choose the continuous colorscale "YlOrBr" from https://matplotlib.org/stable/tutorials/colors/colormaps.html
-colormap = "YlOrBr" #yellow brown color scale
-gdf = makeColorColumn(gdf,variable,vmin,vmax)
-
-#Create "visframe" as a re-projected gdf using EPSG 2163 for CONUS
-visframe = gdf.to_crs({'init':'epsg:2163'})
-
-#Create figure and axes for Matplotlib
+#set up the figure and plotting area
 fig, ax = plt.subplots(1, figsize=(18, 14))
-
-#Remove the axis box around the vis
+#Hide the axis and tick lines as this is a map not a chart
 ax.axis('off')
+# Set the font type
+hfont = {'fontname': 'Helvetica'}
+#set the map title
+ax.set_title('Figure 1: 2023 Median State MSPB Scores', **hfont, fontdict={'fontsize': '38'})
 
-#Set the font for the visualization to Helvetica
-hfont = {'fontname':'Helvetica'}
-
-#Use this to add a title and annotation
-ax.set_title('Figure 1: 2023 Median State MSPB Scores', **hfont, fontdict={'fontsize': '38'}) #, 'fontweight' : 'bold'
-
-#Create colorbar legend
+# Create a colorbar legend
 fig = ax.get_figure()
-
-#Add colorbar axes to the figure
-#This will take some iterating to get it where you want it [l,b,w,h] right
-#l:left, b:bottom, w:width, h:height; in normalized unit (0-1)
+# Create a small rectangular plot region for the colorbar and set the coordinates
 cbax = fig.add_axes([0.89, 0.21, 0.03, 0.31])
 
-cbax.set_title("Median Medicare Spending\nper Beneficiary Score", **hfont, fontdict={'fontsize': '15', 'fontweight' : '0'})
+# Add a title above the colorbar
+cbax.set_title("Median Medicare Spending\nper Beneficiary Score", **hfont, fontdict={'fontsize': '15', 'fontweight': '0'})
 
-#Add color scale
-sm = plt.cm.ScalarMappable(cmap=colormap,norm=plt.Normalize(vmin = vmin, vmax=vmax))
-
-#Reformat tick labels on legend
+# Create a mapping between numeric MSPB values and colors
+sm = plt.cm.ScalarMappable(cmap=colormap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
 sm._A = []
-fig.colorbar(sm, cax=cbax) #, format=comma_fmt
-tick_font_size = 16
-cbax.tick_params(labelsize=tick_font_size)
+# Fill in the colorbar legend using the custom axes (cbax)
+fig.colorbar(sm, cax=cbax)
+# Enlarge the tick labels on the colorbar
+cbax.tick_params(labelsize=16)
 
-# annotate the data source, date of access, and hyperlink
+#Add a note to the figure
 ax.annotate("Data: CMS Medicare Spending Per Beneficiary - Hospital, accessed 2 Oct 2025\nhttps://data.cms.gov/provider-data/dataset/rrqw-56er#data-table",
-            xy=(0.22, .085), xycoords='figure fraction', fontsize= 14, color='#555555')
+            xy=(0.22, .085), xycoords='figure fraction', fontsize=14, color='#555555')
 
-# create map
-# Note: we're going state by state here because of unusual coloring behavior when trying to plot the entire dataframe using the "value_determined_color" column
+# Loop through each State row,
 for row in visframe.itertuples():
-    if row.State not in ['AK','HI']:
-        vf = visframe[visframe.State==row.State]
-        c = gdf[gdf.State==row.State][0:1].value_determined_color.item()
+    # Handle AK and HI later
+    if row.State not in ['AK', 'HI']:
+        # Take the shape of the current state
+        vf = visframe[visframe.State == row.State]
+        # Retrieves a precomputed color associated with the state's MSPB value
+        c = gdf[gdf.State == row.State][0:1].value_determined_color.item()
+        # Plot the state on the main map
         vf.plot(color=c, linewidth=0.8, ax=ax, edgecolor='0.8')
 
-#Add Alaska
+# Add Alaska inset map
+#Create a smaller plotting area for alaska
 akax = fig.add_axes([0.1, 0.17, 0.2, 0.19])
+#Hide the axes again
 akax.axis('off')
-#Polygon to clip western islands
-polygon = Polygon([(-170,50),(-170,72),(-140, 72),(-140,50)])
-alaska_gdf = gdf[gdf.State=='AK']
-alaska_gdf.clip(polygon).plot(color=gdf[gdf.State=='AK'].value_determined_color, linewidth=0.8,ax=akax, edgecolor='0.8')
+#Create a bounding box to clip Alaska's geometry
+polygon = Polygon([(-170, 50), (-170, 72), (-140, 72), (-140, 50)])
+#Extract Alaska geometry from the gdf dataframe
+alaska_gdf = gdf[gdf.State == 'AK']
+#clips geometry to the polygon and draws Alaska in its inset
+alaska_gdf.clip(polygon).plot(color=gdf[gdf.State == 'AK'].value_determined_color, linewidth=0.8, ax=akax, edgecolor='0.8')
 
-#Add Hawaii
+
+# Add Hawaii Inset Map
 hiax = fig.add_axes([.28, 0.20, 0.1, 0.1])
+#Hide the Axes
 hiax.axis('off')
+# create the bounding box for the Hawaii polygon
+hipolygon = Polygon([(-160, 0), (-160, 90), (-120, 90), (-120, 0)])
+#Extract the shape of Hawaii from the gdf dataframe
+hawaii_gdf = gdf[gdf.State == 'HI']
+# Clips the geometry to the polygon and draws Hawaii in its inset
+hawaii_gdf.clip(hipolygon).plot(column=variable, color=hawaii_gdf['value_determined_color'], linewidth=0.8, ax=hiax, edgecolor='0.8')
 
-#Polygon to clip western islands
-hipolygon = Polygon([(-160,0),(-160,90),(-120,90),(-120,0)])
-hawaii_gdf = gdf[gdf.State=='HI']
-hawaii_gdf.clip(hipolygon).plot(column=variable, color=hawaii_gdf['value_determined_color'], linewidth=0.8,ax=hiax, edgecolor='0.8')
+#Builds a file path in the current working directory
+map_path = os.getcwd() + '/MSPBmap.png'
+#Save the figure
+fig.savefig(map_path, dpi=400, bbox_inches="tight")
 
-# bbox_inches="tight" keeps the vis from getting cut off at the edges in the saved png
-# dip is "dots per inch" and controls image quality.  Many scientific journals have specifications for this
-# https://stackoverflow.com/questions/16183462/saving-images-in-python-at-a-very-high-quality
-fig.savefig(os.getcwd()+'/MSPBmap.png',dpi=400, bbox_inches="tight")
+#Log in the log file that we saved the map, including the map path
+logger.info(f'Map visual saved to {map_path}')
 
 
-'''Regional Table: generate a table grouping states by region, finding median MSPB score and total hospitals from which
-median is based on'''
-#Create the regional categories
-ne = ['ME', 'VT', 'NH', 'CT','MA', 'RI']
+# -------------------------------------------------------
+# REGIONAL TABLE
+# -------------------------------------------------------
+logger.info('--- Building regional table ---')
+
+#Create lists that categorize each state by region
+ne = ['ME', 'VT', 'NH', 'CT', 'MA', 'RI']
 midatl = ['NY', 'PA', 'NJ', 'MD', 'DE', 'DC']
 midwest = ['OH', 'MI', 'IN', 'IL', 'WI', 'IA', 'MO', 'MN', 'ND', 'SD', 'NE', 'KS']
 southwest = ['OK', 'TX', 'AZ', 'NM']
 west = ['CO', 'WY', 'MT', 'UT', 'ID', 'WA', 'OR', 'NV', 'CA', 'AK', 'HI']
 south = ['VA', 'WV', 'KY', 'NC', 'TN', 'AR', 'SC', 'GA', 'AL', 'MS', 'LA', 'FL']
 
-#Create new Region column
-score_df.insert(loc = 6, column = 'Region', value = np.nan)
+#create a master list that holds all of the state names
+all_regional_states = ne + midatl + midwest + southwest + west + south
+logger.info(f'There are {len(all_regional_states)} states in all lists.')
 
-#Iterate through the data and assign a region to each row based on the state a hospital is located in
-score_df = score_df.reset_index()  # make sure indexes pair with number of rows
+#Insert a new list title region
+score_df.insert(loc=6, column='Region', value=np.nan)
+#reset the index of the score_df
+score_df = score_df.reset_index()
 
-#Create a function to
+#Create a helper function that sorts the States into regional categories
 def categorize_region(value):
     if value in ne:
         return 'North East'
@@ -245,218 +320,211 @@ def categorize_region(value):
     elif value in south:
         return 'South'
 
-#Apply the function to assign Region categories
+#apply the function to the score_df and fill the region column
 score_df['Region'] = score_df['State'].apply(categorize_region)
 
-# Export to an Excel document to review the data
+# Flag any states that didn't get assigned a region
+unassigned = score_df[score_df['Region'].isnull()]['State'].unique().tolist()
+if unassigned:
+    logger.warning(f'The following states were not assigned a region: {unassigned}')
+else:
+    logger.info('All states successfully assigned to a region')
+
+# Export the score_df to an Excel file
 score_df.to_excel('/Users/emilyquick-cole/Documents/Python/medicare_analysis/score_df.xlsx', index=False)
+# Flag the eported file to an Excel file.
+logger.info('Score dataframe with region assignments exported to score_df.xlsx')
 
-'''Formatting Data for Regional Table: group hospitals by state and take their median Score and reset the index of 
-the resulting dataframe'''
-
-#Set the region as a categorical variable
+#Set the region column as a category
 score_df['Region'] = score_df['Region'].astype('category')
 
-#take median of score by region
-regional_df = score_df.groupby(['Region'])['Score'].median().reset_index(drop= False)
-
-#Count the number of hospitals with recorded scores for each region
+#Find the median value Score for each region
+regional_df = score_df.groupby(['Region'])['Score'].median().reset_index(drop=False)
+#Print the value counts of each region
 reg_hosp_df = score_df['Region'].value_counts()
 
-#Count the number of hospitals with no recorded scores ("not available") for each region
+# Recall the na_df from earlier and categorize these values by region
 na_df['Region'] = na_df['State'].apply(categorize_region)
-print("na_df is", na_df)
-
-# Export to an Excel document to review the data
-na_df.to_excel('/Users/emilyquick-cole/Documents/Python/medicare_analysis/na_df.xlsx', index=False)
+#create a table of value counts of these states that are missing a score
 na_hosp_df = na_df['Region'].value_counts()
-print("na_hosp_df is", na_hosp_df)
 
-#Merge the dataframes on Region
-#First merge the dataframe with median Score values and hospitals that reported
-table_df = regional_df.merge(reg_hosp_df,left_on='Region',right_on='Region')
+#Export to Excel a datafile of the rows that don't have a Score value
+na_df.to_excel('/Users/emilyquick-cole/Documents/Python/medicare_analysis/na_df.xlsx', index=False)
+# Record to the log that we exported this dataframe to Excel
+logger.info('Hospitals with Score Not Available exported to na_df.xlsx')
 
-#Then merge that dataframe with the counts of hospitals that had "Not Available" reported
-table_df = table_df.merge(na_hosp_df,left_on='Region',right_on='Region')
-
-#Create a new column that totals the number of hospitals with reported scores and hospitals with "not available" scores
+#Merge the Regional Hospital dataframe onto the regional dataframe
+table_df = regional_df.merge(reg_hosp_df, left_on='Region', right_on='Region')
+# Merge the Na dataframe onto table dataframe
+table_df = table_df.merge(na_hosp_df, left_on='Region', right_on='Region')
+#Create a new row that sums the counts
 table_df['Total Hospitals'] = table_df['count_x'] + table_df['count_y']
-
-#Reorganize the table so that the order is Region, Total Count, Hospitals w/ Scores Count, Hospitals w/o Scores Count, Median Score
-table_df = table_df.iloc[:, [0, 4, 3, 2, 1]]  # 'Region', 'Score', 'count' is original order
-
-#Rename column headers
+# Take all the rows of table_df and select the specified columns
+table_df = table_df.iloc[:, [0, 4, 3, 2, 1]]
+# Rename the columns
 table_df = table_df.rename(columns={'Score': 'Median Score', 'count_x': 'Hospitals w/ Scores', 'count_y': 'Hospitals w/o Scores'})
-
-#Sort the data frame from lowest to highest regional median score
+#Sort the values by Median Score
 table_df = table_df.sort_values('Median Score')
 
-# Make a list of columns we'd like to sum for a "Totals" row
+#Save to the log that we built a regional table and the number of regions
+logger.info(f'Regional table built — {len(table_df)} regions')
+#For each region, print the region and the median score and the number of hospitals
+for _, row in table_df.iterrows():
+    logger.info(f"  {row['Region']}: Median Score {row['Median Score']:.4f}, Total Hospitals {int(row['Total Hospitals'])}")
+
+# Save the columns we want to sum
 cols_to_sum = ['Total Hospitals', 'Hospitals w/o Scores', 'Hospitals w/ Scores']
-
-#Add a totals row
+# Sum the specified columns of the table_Df and save to totals
 totals = table_df[cols_to_sum].sum(numeric_only=True)
-
-# Create a new name for the row
+#convert table row to a series
 total_row = pd.Series(totals, name='Total')
-
-#Add a 'Total' label at the end of the list of regions
+#Set the last row value of "Region" as the string Total
 total_row['Region'] = 'Total'
-
-#Review what the table looks like
-print("merged table", table_df)
-
-# Append the totals row to the DataFrame
+# Set the row values as the total_row values
 table_df.loc['Total'] = total_row
+# Record in the log that we added a totals row
+logger.info(f'Totals row added — {int(totals["Total Hospitals"])} total hospitals across all regions')
 
 
-'''Generate Regional Data Table'''
-# Apply styling to dataframe, this creates a styler object that will later need to be converted back into a dataframe
+# -------------------------------------------------------
+# REGIONAL TABLE VISUAL
+# -------------------------------------------------------
+logger.info('--- Generating regional table visual ---')
 
-#First set the range for the choropleth values with the upper bound the rounded up maximum value
+# set the minimum median value from the Median Score colum as medianvmin
 medianvmin = table_df['Median Score'].min()
+# Set the maximum median value from the Median Score colum as medianvmax
 medianvmax = table_df['Median Score'].max()
-
-#Establish the caption styles before styling table
+# Set the style
 styles = [
-        dict(selector="caption", props=[
-            ("font-size", "20px"),
-            ("padding-bottom", "13px"),
-            ('text-align', 'left'),
-            ('font-family', 'Helvetica')
-            # Adjust this value to control height
-        ])
-    ]
+    dict(selector="caption", props=[
+        ("font-size", "20px"),
+        ("padding-bottom", "13px"),
+        ('text-align', 'left'),
+        ('font-family', 'Helvetica')
+    ])
+]
 
-#Establish a function to bold only the Totals row
+# Create a function that bolds the row if the Region value =  "Total"
 def bold_row(row):
-    # Example: Bold the row where 'Name' is 'Charlie'
     if row['Region'] == 'Total':
         return ['font-weight: bold'] * len(row)
     else:
         return [''] * len(row)
-
-#Reset the index
+#reset the table_df index
 table_df.reset_index(inplace=True, drop=True)
 
-#Apply styling to the table_df dataframe.
-#Hide the index for final output, align the text, format the median score to only include 2 decimal points
-#set the background gradient to align with the map output figure and add a caption
-#For future use to add caption: .set_caption('2023 Median MSPB Scores by U.S. Region')
-styled_table_df =(table_df.style.hide(axis = "index").set_properties(**{'text-align':'center', 'font-size': '12pt'}).highlight_null(props="color: transparent;")
-                  .format({'Total Hospitals':"{:,}",'Hospitals w/o Scores':"{:,}",'Hospitals w/ Scores':"{:,}",'Median Score': "{:.2f}"})
-                  .background_gradient(axis = None, vmin =medianvmin, vmax=medianvmax,cmap=colormap, subset = pd.IndexSlice[0:5, 'Median Score'])
-                  .set_caption('Table 1: 2023 Median U.S. Region MSPB Scores')).apply(bold_row, axis = 1).set_table_styles(styles)
+#create the stylized table
+styled_table_df = (table_df.style.hide(axis="index")
+                   .set_properties(**{'text-align': 'center', 'font-size': '12pt'})
+                   .highlight_null(props="color: transparent;")
+                   .format({'Total Hospitals': "{:,}", 'Hospitals w/o Scores': "{:,}",
+                            'Hospitals w/ Scores': "{:,}", 'Median Score': "{:.2f}"})
+                   .background_gradient(axis=None, vmin=medianvmin, vmax=medianvmax,
+                                        cmap=colormap, subset=pd.IndexSlice[0:5, 'Median Score'])
+                   .set_caption('Table 1: 2023 Median U.S. Region MSPB Scores')
+                   .apply(bold_row, axis=1)
+                   .set_table_styles(styles))
 
 
-# Export the styled DataFrame and use dpi = 400 for higher quality graphic and to match map
-dfi.export(styled_table_df, '/Users/emilyquick-cole/Documents/Python/medicare_analysis/regional_table.png', dpi = 400)
+#Set the table path
+table_path = '/Users/emilyquick-cole/Documents/Python/medicare_analysis/regional_table.png'
+# Export the table path
+dfi.export(styled_table_df, table_path, dpi=400)
+# Record to the log where we saved teh table_path
+logger.info(f'Regional table visual saved to {table_path}')
 
-'''Generate PDF functions '''
-#Develop a letterhead function
+#Print the data for visual 3 to the log
+logger.info(f"\n--- Regional Table ---\n{table_df.to_string()}\n----------------------------")
+
+
+# -------------------------------------------------------
+# PDF GENERATION
+# -------------------------------------------------------
+logger.info('--- Generating PDF report ---')
+
+#Create a helper function to generate a pdf
 def create_letterhead(letterhead, pdf):
     pdf.set_font('Helvetica', 'b', 20)
     pdf.multi_cell(0, 8, txt=letterhead, border=0, align='L', fill=0)
-    #pdf.write(5, letterhead)
     pdf.ln(2)
-
-    # Add date of report
     pdf.set_font('Helvetica', '', 10)
-    #pdf.set_text_color(r=128, g=128, b=128)
     current_time = time.localtime()
     today = time.strftime("%B %d, %Y", current_time)
     pdf.write(4, f'{today}')
     pdf.ln(8)
-
-#Develop a title function
+#Create a helper function to generate the title of the PDF
 def create_title(title, pdf):
-    # Add main title
     pdf.set_font('Helvetica', 'b', 20)
     pdf.ln(40)
     pdf.write(5, title)
     pdf.ln(10)
-
-    # Add date of report
     pdf.set_font('Helvetica', '', 14)
     pdf.set_text_color(r=128, g=128, b=128)
     current_time = time.localtime()
     today = time.strftime("%d/%m/%Y", current_time)
     pdf.write(4, f'{today}')
-
-    # Add line break
     pdf.ln(10)
-
-def create_subtitle(subtitle,pdf):
+#Create a subtitle helper function
+def create_subtitle(subtitle, pdf):
     pdf.set_font('Helvetica', 'BU', 12)
     pdf.write(5, subtitle)
     pdf.ln(8)
-
-#Develop a function to add text to pdf
+#Create a function to write words to teh pdf
 def write_to_pdf(pdf, words):
-    # Set text colour, font size, and font type
     pdf.set_text_color(r=0, g=0, b=0)
     pdf.set_font('Helvetica', '', 10)
-    pdf.multi_cell(0, 5, txt = words, border=0, align='L', fill=0)
-    #pdf.write(5, words)
+    pdf.multi_cell(0, 5, txt=words, border=0, align='L', fill=0)
 
 class PDF(FPDF):
-
     def footer(self):
         self.set_y(-15)
         self.set_font('Helvetica', 'I', 8)
         self.set_text_color(128)
         self.cell(0, 10, 'Page ' + str(self.page_no()), 0, 0, 'C')
 
-
-'''Create the PDF'''
-# Global Variables
 TITLE = "Sample Data Report - Medicare Spending per Beneficiary Score (MSPB) Overview"
 LETTERHEAD = "Sample Data Report - Medicare Spending per Beneficiary Score (MSPB) Overview"
 WIDTH = 210
 HEIGHT = 297
-#Don't set a universal variable for subtitle because these will change throughout the report
-
-# Create PDF
-pdf = PDF() # A4 (210 by 297 mm)
-
-'''First Page of PDF'''
-# Add Page
+# Set up the PDF and put all information together
+pdf = PDF()
 pdf.add_page()
 
-# Add letterhead and title
 create_letterhead(LETTERHEAD, pdf)
-#create_title(TITLE, pdf)
+create_subtitle('Background', pdf)
 
-#Add a subtitle
-create_subtitle('Background',pdf)
-
-# Add some words to PDF
 write_to_pdf(pdf, "Medicare is a U.S. federal health insurance program primarily for people age 65 or older, but also for younger individuals with certain disabilities, or other chronic conditions. It provides care coverage through different parts, such as Part A for hospital stays and hospice care and Part B for doctors' services and outpatient care.")
 pdf.ln(5)
 
 write_to_pdf(pdf, "According to the Centers for Medicaid and Medicare Services (CMS), the Medicare Spending Per Beneficiary (MSPB) Measure shows whether Medicare spends more, less, or about the same for an episode of care (episode) at a specific hospital compared to all hospitals nationally. An MSPB episode includes Medicare Part A and Part B payments for services provided by hospitals and other healthcare providers the 3 days prior to, during, and 30 days following a patient's inpatient stay. This measure evaluates hospitals' costs compared to the costs of the national median (or midpoint) hospital. This measure takes into account important factors like patient age and health status (risk adjustment) and geographic payment differences (payment-standardization).")
 pdf.ln(5)
 
-create_subtitle('Visuals and Findings',pdf)
+create_subtitle('Visuals and Findings', pdf)
 
-# Add the generated visualisations to the PDF
-pdf.image("/Users/emilyquick-cole/Documents/Python/medicare_analysis/regional_table.png", 10, 115, 95, 50) #WIDTH/2-10
-pdf.image("/Users/emilyquick-cole/Documents/Python/medicare_analysis/MSPBmap.png", 105,115, 95)
+pdf.image("/Users/emilyquick-cole/Documents/Python/medicare_analysis/regional_table.png", 10, 115, 95, 50)
+pdf.image("/Users/emilyquick-cole/Documents/Python/medicare_analysis/MSPBmap.png", 105, 115, 95)
 pdf.ln(70)
 
-#Bullet points on data
-write_to_pdf(pdf, "- In 2023 4,530 hospitals across the U.S. received medicare patients. Of these, 2,909  from 49 different states reported MSPB scores. Eight states had a median MSPB score of 1.0, while 10 states' median scores were above 1.0, and 32 states' median scores were below 1.0.")
+write_to_pdf(pdf, "- In 2023 4,530 hospitals across the U.S. received medicare patients. Of these, 2,909 from 49 different states reported MSPB scores. Eight states had a median MSPB score of 1.0, while 10 states' median scores were above 1.0, and 32 states' median scores were below 1.0.")
 pdf.ln(2)
 write_to_pdf(pdf, "- These hospitals are located in all regions of the U.S., with the most concentrated in the midwest (1,355), the south (1,137), and the west (811). The midwest and the south had the lowest median MSPB scores (0.97), while the mid-atlantic and the southwest had the greatest (1.01).")
 pdf.ln(2)
 write_to_pdf(pdf, "- Of the 4,591 hospitals, 1,621 hospitals did not report an MSPB. This may be because the hospitals did not meet the minimum number of beneficiary episodes (25), they had a significant number of episodes that are excluded for specific reasons, or the hospitals opted out of the Medicare program entirely.")
 pdf.ln(5)
-#To add another page: pdf.add_page()
 
-#Add Conclusions
 create_subtitle('Conclusions', pdf)
 write_to_pdf(pdf, "A lower MSPB score suggests that a hospital or provider is more cost-efficient than the national average, while a higher score indicates higher spending. The score is used to affect a hospital's payments from Medicare. A higher MSPB score (meaning higher spending) can result in lower incentive payments or financial penalties. Overall, the MSPB measure is designed to identify variations in spending and to incentivize providers to deliver high-quality care in a more cost-effective manner.")
 pdf.ln(2)
+#Export the pdf
+pdf_path = "/Users/emilyquick-cole/Documents/Python/medicare_analysis/2023MSPBReport.pdf"
+pdf.output(pdf_path, 'F')
+#Set up a flag to show where the PDF was exported to 
+logger.info(f'PDF report saved to {pdf_path}')
 
-# Generate the PDF
-pdf.output("/Users/emilyquick-cole/Documents/Python/medicare_analysis/2023MSPBReport.pdf", 'F')
+# -------------------------------------------------------
+# RUN COMPLETE
+# -------------------------------------------------------
+logger.info('=' * 60)
+logger.info('Medicare MSPB Analyzer — Run complete')
+logger.info('=' * 60)
