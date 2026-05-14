@@ -4,17 +4,18 @@ The purpose of this analysis is to produce a sample output of a one-page summary
 ## Description
 
 The following steps were conducted within this analysis: 
-1. Import relevant packages
-2. Explore the data, removing any rows that do not contain a numeric MSPB value.
-3. Format the data for the map visual by grouping MSPB values by state and taking the median.
-4. Create the map graphic.
-5. Create a variable that assigns to each row a region based on which state the hospital is located.
-6. Take the median MSPB value for each region.
-7. Create a table that contains median MSPB values by U.S. region.
-8. Stylize and output the table.
-9. Create functions that will be used to design our PDF output (header/subheadings etc.)
-10. Write the background information, findings, and conclusionary statements to the PDF.
-11. Output the PDF file. 
+1. Set up the Log file.
+2. Import relevant packages.
+3. Explore the data, removing any rows that do not contain a numeric MSPB value.
+4. Format the data for the map visual by grouping MSPB values by state and taking the median.
+5. Create the map graphic.
+6. Create a variable that assigns to each row a region based on which state the hospital is located.
+7. Take the median MSPB value for each region.
+8. Create a table that contains median MSPB values by U.S. region.
+9. Stylize and output the table.
+10. Create functions that will be used to design our PDF output (header/subheadings etc.)
+11. Write the background information, findings, and conclusionary statements to the PDF.
+12. Output the PDF file. 
 
 ## Getting Started
 
